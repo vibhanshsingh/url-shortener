@@ -1,0 +1,20 @@
+# --- Milestone 2: minimal set to get FastAPI + health checks running ---
+# We'll add sqlalchemy, alembic, redis, aiokafka, etc. in the milestones
+# where we actually start using them. No dependency goes in "just in case."
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# Only used in this milestone to prove connectivity from the health
+# endpoint. Full async SQLAlchemy setup comes in Milestone 3.
+asyncpg==0.30.0
+redis==5.2.1
+
+# --- Milestone 3: models + migrations ---
+sqlalchemy==2.0.36
+alembic==1.14.0
+greenlet==3.1.1
+
+# --- Milestone 4: testing ---
+pytest==8.3.4

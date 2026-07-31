@@ -1,0 +1,42 @@
+"""
+Centralized configuration.
+
+Why this file exists: every other option is worse. Reading os.environ
+directly, scattered across the codebase, means (a) no validation until
+something crashes deep in a request, (b) no single place to see what
+config the app actually depends on, and (c) no type safety.
+
+pydantic-settings gives us: env vars validated and type-coerced at
+startup (fail fast, not mid-request), a single object injected wherever
+config is needed, and free .env file loading for local dev.
+"""
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+    # --- Postgres ---
+    postgres_user: str
+    postgres_password: str
+    postgres_db: str
+    postgres_host: str = "db"  # service name from docker-compose.yml, not localhost
+    postgres_port: int = 5432
+
+    # --- Redis ---
+    redis_host: str = "redis"
+    redis_port: int = 6379
+
+    @property
+    def database_url(self) -> str:
+        return (
+            f"postgresql://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
+
+# Instantiated once, imported everywhere. FastAPI's dependency injection
+# will wrap this in Milestone 3 so it's swappable in tests — for now,
+# a module-level singleton is the right amount of complexity.
+settings = Settings()
