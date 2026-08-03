@@ -23,6 +23,7 @@ import redis.asyncio as redis
 from fastapi import FastAPI, status
 from fastapi.responses import JSONResponse
 
+from app.api.routes.redirect import router as redirect_router
 from app.api.routes.shorten import router as shorten_router
 from app.core.config import settings
 
@@ -59,3 +60,11 @@ async def readiness() -> JSONResponse:
         status_code=status.HTTP_200_OK if all_healthy else status.HTTP_503_SERVICE_UNAVAILABLE,
         content={"status": "ready" if all_healthy else "not_ready", "checks": checks},
     )
+
+
+# Registered LAST, deliberately: "/{short_code}" matches any single
+# path segment, so anything registered after this point risks being
+# silently shadowed by it. See the docstring in
+# app/api/routes/redirect.py for the full explanation of Starlette's
+# registration-order route matching.
+app.include_router(redirect_router)

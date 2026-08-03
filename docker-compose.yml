@@ -55,10 +55,10 @@ services:
     # In dev, mount source for live reload. Remove this in prod images.
     volumes:
       - ./app:/app/app
-      - ./tests:/app/tests
-      - ./pytest.ini:/app/pytest.ini
       - ./migrations:/app/migrations
       - ./alembic.ini:/app/alembic.ini
+      - ./tests:/app/tests
+      - ./pytest.ini:/app/pytest.ini
 
 networks:
   url_shortener_net:

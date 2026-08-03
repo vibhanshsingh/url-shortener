@@ -12,12 +12,17 @@ layer depends on — as long as both honor it, the service can't tell
 the difference between the fake and the real thing.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from app.services.url_service import SelfReferentialURLError, URLService
+from app.services.url_service import (
+    SelfReferentialURLError,
+    URLGoneError,
+    URLNotFoundError,
+    URLService,
+)
 
 
 class FakeURLRepository:
@@ -27,10 +32,14 @@ class FakeURLRepository:
 
     def __init__(self):
         self._by_long_url: dict[str, SimpleNamespace] = {}
+        self._by_short_code: dict[str, SimpleNamespace] = {}
         self._next_id_counter = 1
 
     async def get_active_by_long_url(self, long_url: str):
         return self._by_long_url.get(long_url)
+
+    async def get_by_short_code_any_status(self, short_code: str):
+        return self._by_short_code.get(short_code)
 
     async def reserve_next_id(self) -> int:
         id_ = self._next_id_counter
@@ -45,8 +54,10 @@ class FakeURLRepository:
             created_by_ip=created_by_ip,
             created_at=datetime.now(timezone.utc),
             is_active=True,
+            expires_at=None,
         )
         self._by_long_url[long_url] = row
+        self._by_short_code[short_code] = row
         return row
 
 
@@ -103,3 +114,32 @@ class TestSelfReferentialRejection:
     async def test_allows_normal_external_url(self, service):
         row, _ = await service.create_short_url("https://github.com", created_by_ip=None)
         assert row.long_url == "https://github.com"
+
+
+class TestResolveForRedirect:
+    async def test_raises_not_found_for_unknown_code(self, service):
+        with pytest.raises(URLNotFoundError):
+            await service.resolve_for_redirect("doesNotExist")
+
+    async def test_returns_row_for_active_code(self, service):
+        created, _ = await service.create_short_url("https://example.com/x", created_by_ip=None)
+        resolved = await service.resolve_for_redirect(created.short_code)
+        assert resolved.long_url == "https://example.com/x"
+
+    async def test_raises_gone_for_deactivated_code(self, service):
+        created, _ = await service.create_short_url("https://example.com/y", created_by_ip=None)
+        created.is_active = False  # simulate a soft delete
+        with pytest.raises(URLGoneError):
+            await service.resolve_for_redirect(created.short_code)
+
+    async def test_raises_gone_for_expired_code(self, service):
+        created, _ = await service.create_short_url("https://example.com/z", created_by_ip=None)
+        created.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+        with pytest.raises(URLGoneError):
+            await service.resolve_for_redirect(created.short_code)
+
+    async def test_future_expiry_still_resolves_successfully(self, service):
+        created, _ = await service.create_short_url("https://example.com/w", created_by_ip=None)
+        created.expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+        resolved = await service.resolve_for_redirect(created.short_code)
+        assert resolved.long_url == "https://example.com/w"

@@ -28,9 +28,24 @@ class URLRepository:
         return result.scalar_one_or_none()
 
     async def get_active_by_short_code(self, short_code: str) -> URL | None:
-        """Used by the redirect endpoint in Milestone 6, added here now
-        since it belongs naturally alongside the other lookups."""
+        """Only returns active, non-deleted URLs. Used where 'does an
+        active URL with this code exist' is the exact question — e.g.
+        rejecting a newly-created code that collides with something
+        still live."""
         stmt = select(URL).where(URL.short_code == short_code, URL.is_active == True)  # noqa: E712
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_by_short_code_any_status(self, short_code: str) -> URL | None:
+        """
+        Returns a URL row regardless of is_active — including
+        soft-deleted ones. The redirect endpoint needs this specific
+        distinction: a short code that was NEVER created should be a
+        404, but one that existed and was later deactivated or expired
+        should be a 410 Gone. Filtering by is_active here would
+        collapse both cases into an indistinguishable "not found."
+        """
+        stmt = select(URL).where(URL.short_code == short_code)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 

@@ -6,6 +6,7 @@ background job, which is exactly why it's testable without spinning up
 a test HTTP client.
 """
 
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from app.core.config import settings
@@ -18,6 +19,17 @@ class SelfReferentialURLError(ValueError):
     """Raised when someone tries to shorten a URL that points back at
     this service itself — would create a confusing or infinite
     redirect chain."""
+
+
+class URLNotFoundError(Exception):
+    """No URL was ever created with this short code. Maps to 404."""
+
+
+class URLGoneError(Exception):
+    """A URL existed for this short code but is no longer usable
+    (soft-deleted or past its expires_at). Maps to 410, not 404 —
+    "used to exist, deliberately doesn't anymore" is a meaningfully
+    different fact than "never existed" for an API consumer."""
 
 
 class URLService:
@@ -54,6 +66,28 @@ class URLService:
             created_by_ip=created_by_ip,
         )
         return url_row, False
+
+    async def resolve_for_redirect(self, short_code: str) -> URL:
+        """
+        Looks up a short code for redirect purposes and enforces the
+        business rules around expiry/deactivation. Raises
+        URLNotFoundError or URLGoneError rather than returning None,
+        so the route layer's error handling is a simple try/except
+        instead of a chain of `if row is None` / `if not row.is_active`
+        checks re-derived at the HTTP layer.
+        """
+        row = await self._repository.get_by_short_code_any_status(short_code)
+
+        if row is None:
+            raise URLNotFoundError(f"No URL found for short code {short_code!r}")
+
+        if not row.is_active:
+            raise URLGoneError(f"Short code {short_code!r} has been deactivated")
+
+        if row.expires_at is not None and row.expires_at <= datetime.now(timezone.utc):
+            raise URLGoneError(f"Short code {short_code!r} expired at {row.expires_at}")
+
+        return row
 
     def _reject_self_referential(self, long_url: str) -> None:
         host = urlparse(long_url).netloc
