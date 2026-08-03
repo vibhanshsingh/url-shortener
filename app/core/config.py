@@ -28,6 +28,18 @@ class Settings(BaseSettings):
     redis_host: str = "redis"
     redis_port: int = 6379
 
+    # --- Application ---
+    # Used to build the full short_url in API responses, and to detect
+    # someone trying to shorten a URL that points back at us (which
+    # would create a confusing or infinite redirect chain).
+    base_url: str = "http://localhost:8000"
+
+    @property
+    def base_host(self) -> str:
+        from urllib.parse import urlparse
+
+        return urlparse(self.base_url).netloc
+
     @property
     def database_url(self) -> str:
         return (

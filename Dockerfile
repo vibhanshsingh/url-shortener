@@ -17,6 +17,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Now copy the rest of the application code.
 COPY ./app ./app
 
+# Tests and pytest configuration need to be available inside the image
+# for `docker compose exec api pytest ...` to discover and run them.
+COPY pytest.ini .
+COPY ./tests ./tests
+
 # Alembic needs its config file and migration scripts inside the image
 # too — these were missed originally, which is exactly why `alembic
 # upgrade head` failed with "no config file 'alembic.ini' found": the

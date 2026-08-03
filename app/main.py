@@ -23,9 +23,11 @@ import redis.asyncio as redis
 from fastapi import FastAPI, status
 from fastapi.responses import JSONResponse
 
+from app.api.routes.shorten import router as shorten_router
 from app.core.config import settings
 
 app = FastAPI(title="URL Shortener", version="0.1.0")
+app.include_router(shorten_router)
 
 
 @app.get("/health/live")
