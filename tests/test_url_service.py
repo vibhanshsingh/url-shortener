@@ -2,14 +2,15 @@
 This is exactly the payoff of the service layer being framework- and
 database-agnostic (Milestone 1's design pattern discussion, made
 concrete): we test all the real business logic here — idempotency,
-self-referential rejection, encoding — using a fake in-memory
-repository instead of a real Postgres connection. No Docker, no test
-database, no network. These tests run in milliseconds.
+self-referential rejection, encoding, and now cache-aside behavior —
+using fake in-memory repository and cache instead of real Postgres and
+Redis connections. No Docker, no network. These tests run in
+milliseconds.
 
-FakeURLRepository below deliberately implements the exact same method
-signatures as the real URLRepository. That's the contract the service
-layer depends on — as long as both honor it, the service can't tell
-the difference between the fake and the real thing.
+FakeURLRepository and FakeURLCache below deliberately implement the
+exact same method signatures as the real classes. That's the contract
+the service layer depends on — as long as both honor it, the service
+can't tell the difference between the fake and the real thing.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.url_service import (
+    RedirectTarget,
     SelfReferentialURLError,
     URLGoneError,
     URLNotFoundError,
@@ -34,11 +36,15 @@ class FakeURLRepository:
         self._by_long_url: dict[str, SimpleNamespace] = {}
         self._by_short_code: dict[str, SimpleNamespace] = {}
         self._next_id_counter = 1
+        # Lets tests assert the cache actually prevented a DB call,
+        # not just that the returned value happened to be correct.
+        self.db_lookup_count = 0
 
     async def get_active_by_long_url(self, long_url: str):
         return self._by_long_url.get(long_url)
 
     async def get_by_short_code_any_status(self, short_code: str):
+        self.db_lookup_count += 1
         return self._by_short_code.get(short_code)
 
     async def reserve_next_id(self) -> int:
@@ -61,9 +67,40 @@ class FakeURLRepository:
         return row
 
 
+class FakeURLCache:
+    """In-memory stand-in for URLCache. Same interface as the real
+    Redis-backed one: get returns a dict or None, set stores a dict,
+    invalidate removes it."""
+
+    def __init__(self):
+        self._store: dict[str, dict] = {}
+
+    async def get(self, short_code: str) -> dict | None:
+        return self._store.get(short_code)
+
+    async def set(self, short_code: str, long_url: str, expires_at, ttl_seconds=None) -> None:
+        self._store[short_code] = {
+            "long_url": long_url,
+            "expires_at": expires_at.isoformat() if expires_at else None,
+        }
+
+    async def invalidate(self, short_code: str) -> None:
+        self._store.pop(short_code, None)
+
+
 @pytest.fixture
-def service():
-    return URLService(FakeURLRepository())
+def repository():
+    return FakeURLRepository()
+
+
+@pytest.fixture
+def cache():
+    return FakeURLCache()
+
+
+@pytest.fixture
+def service(repository, cache):
+    return URLService(repository, cache)
 
 
 class TestCreateShortUrl:
@@ -99,9 +136,18 @@ class TestCreateShortUrl:
         second, _ = await service.create_short_url("https://example.com/two", created_by_ip=None)
         assert first.short_code != second.short_code
 
+    async def test_creation_warms_the_cache(self, service, cache):
+        # Cache warming (Milestone 7): the code should be cache-ready
+        # immediately after creation, without waiting for a first
+        # redirect/cache-miss to populate it.
+        row, _ = await service.create_short_url("https://example.com/warm", created_by_ip=None)
+        cached = await cache.get(row.short_code)
+        assert cached is not None
+        assert cached["long_url"] == "https://example.com/warm"
+
 
 class TestSelfReferentialRejection:
-    async def test_rejects_url_pointing_at_own_service(self, service, monkeypatch):
+    async def test_rejects_url_pointing_at_own_service(self, service):
         # settings.base_host defaults to "localhost:8000" (parsed from
         # BASE_URL). We don't need to monkeypatch it here since that's
         # exactly the default — but naming it explicitly documents the
@@ -121,25 +167,85 @@ class TestResolveForRedirect:
         with pytest.raises(URLNotFoundError):
             await service.resolve_for_redirect("doesNotExist")
 
-    async def test_returns_row_for_active_code(self, service):
+    async def test_returns_target_for_active_code(self, service):
         created, _ = await service.create_short_url("https://example.com/x", created_by_ip=None)
         resolved = await service.resolve_for_redirect(created.short_code)
+        assert isinstance(resolved, RedirectTarget)
         assert resolved.long_url == "https://example.com/x"
 
-    async def test_raises_gone_for_deactivated_code(self, service):
+    async def test_raises_gone_for_deactivated_code(self, service, cache):
         created, _ = await service.create_short_url("https://example.com/y", created_by_ip=None)
-        created.is_active = False  # simulate a soft delete
+        created.is_active = False  # simulate a soft delete happening in the DB
+
+        # The cache has no concept of is_active (see URLCache docstring
+        # for why) — a real deactivation flow must call cache.invalidate()
+        # itself. We do that explicitly here to simulate that future
+        # integration, rather than the test silently passing only
+        # because the cache still holds stale "active" data.
+        await cache.invalidate(created.short_code)
+
         with pytest.raises(URLGoneError):
             await service.resolve_for_redirect(created.short_code)
 
-    async def test_raises_gone_for_expired_code(self, service):
+    async def test_raises_gone_for_expired_code(self, service, cache):
         created, _ = await service.create_short_url("https://example.com/z", created_by_ip=None)
         created.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+        await cache.invalidate(created.short_code)  # see note above
+
         with pytest.raises(URLGoneError):
             await service.resolve_for_redirect(created.short_code)
 
-    async def test_future_expiry_still_resolves_successfully(self, service):
+    async def test_future_expiry_still_resolves_successfully(self, service, cache):
         created, _ = await service.create_short_url("https://example.com/w", created_by_ip=None)
         created.expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+        await cache.invalidate(created.short_code)
+
         resolved = await service.resolve_for_redirect(created.short_code)
         assert resolved.long_url == "https://example.com/w"
+
+
+class TestCacheAsideBehavior:
+    """Dedicated tests for the cache-aside mechanics themselves —
+    separate from the business-rule tests above, so a cache regression
+    and a business-logic regression fail with clearly different test
+    names."""
+
+    async def test_cache_hit_skips_the_database_entirely(self, service, repository, cache):
+        created, _ = await service.create_short_url("https://example.com/hit", created_by_ip=None)
+        lookups_after_create = repository.db_lookup_count  # creation itself does no lookup
+
+        await service.resolve_for_redirect(created.short_code)
+
+        # The cache was warmed at creation time, so this redirect
+        # should be served entirely from the fake cache — the
+        # repository's lookup method should not have been called again.
+        assert repository.db_lookup_count == lookups_after_create
+
+    async def test_cache_miss_falls_back_to_db_and_warms_cache(self, service, repository, cache):
+        created, _ = await service.create_short_url("https://example.com/miss", created_by_ip=None)
+        # Simulate the cache entry having expired out of Redis (TTL
+        # elapsed) without the underlying data changing.
+        await cache.invalidate(created.short_code)
+
+        resolved = await service.resolve_for_redirect(created.short_code)
+
+        assert resolved.long_url == "https://example.com/miss"
+        assert repository.db_lookup_count == 1  # had to fall back to the DB
+        # And the cache should be warm again after the fallback.
+        assert await cache.get(created.short_code) is not None
+
+    async def test_expired_cache_entry_is_invalidated_on_read(self, service, cache):
+        created, _ = await service.create_short_url("https://example.com/exp2", created_by_ip=None)
+        # Manually poke an expired value directly into the cache,
+        # simulating a link whose expiry was set after it was cached.
+        await cache.set(
+            created.short_code,
+            created.long_url,
+            expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+
+        with pytest.raises(URLGoneError):
+            await service.resolve_for_redirect(created.short_code)
+
+        # The stale entry should have been cleaned up, not left behind.
+        assert await cache.get(created.short_code) is None
