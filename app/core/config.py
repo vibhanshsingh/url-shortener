@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     # would create a confusing or infinite redirect chain).
     base_url: str = "http://localhost:8000"
 
+    # --- Kafka ---
+    kafka_bootstrap_servers: str = "kafka:9092"
+    kafka_click_events_topic: str = "click-events"
+    kafka_click_events_dlq_topic: str = "click-events-dlq"
+    kafka_consumer_group_id: str = "click-event-processor"
+
     @property
     def base_host(self) -> str:
         from urllib.parse import urlparse

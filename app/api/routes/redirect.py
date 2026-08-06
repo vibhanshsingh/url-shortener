@@ -16,12 +16,20 @@ We're safe here because:
   3. This redirect_router is included LAST in main.py, as a deliberate
      safety margin — any future single-segment route we add will only
      be safe if it's registered before this one.
+
+MILESTONE 8: click events are now published via BackgroundTasks. This
+is the concrete mechanism behind "the redirect never waits on
+analytics" — FastAPI runs background tasks AFTER the response has
+already been sent to the client, so publishing to Kafka adds zero
+latency to what the user experiences, even if Kafka itself is slow.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 
 from app.api.dependencies import get_url_service
+from app.events.producer import KafkaEventProducer, get_kafka_producer
+from app.events.schemas import ClickEvent
 from app.services.url_service import URLGoneError, URLNotFoundError, URLService
 
 router = APIRouter(tags=["redirect"])
@@ -38,14 +46,32 @@ router = APIRouter(tags=["redirect"])
 )
 async def redirect_to_long_url(
     short_code: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
     service: URLService = Depends(get_url_service),
+    producer: KafkaEventProducer = Depends(get_kafka_producer),
 ) -> RedirectResponse:
     try:
-        url_row = await service.resolve_for_redirect(short_code)
+        target = await service.resolve_for_redirect(short_code)
     except URLNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except URLGoneError as exc:
         raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
+
+    # Built here, in the route, because this is the one place with
+    # direct access to the HTTP request's headers/client info — the
+    # service layer deliberately never sees a Request object (it has
+    # no HTTP concerns, per Milestone 1's layering).
+    event = ClickEvent.now(
+        short_code=short_code,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        referrer=request.headers.get("referer"),  # yes, "referer" — the header name's historical misspelling
+    )
+    # add_task, not `await producer.publish_click_event(event)` directly:
+    # this schedules the publish to run AFTER the response below has
+    # already been sent to the client.
+    background_tasks.add_task(producer.publish_click_event, event)
 
     # DELIBERATE CHOICE, WORTH RECONSIDERING: 301 means browsers may
     # cache this redirect and stop contacting our server on repeat
@@ -56,6 +82,6 @@ async def redirect_to_long_url(
     # because this is exactly the kind of trade-off worth raising in a
     # design review rather than silently accepting.
     return RedirectResponse(
-        url=url_row.long_url,
+        url=target.long_url,
         status_code=status.HTTP_301_MOVED_PERMANENTLY,
     )

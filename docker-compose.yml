@@ -35,6 +35,66 @@ services:
     networks:
       - url_shortener_net
 
+  # Official image, published by the Apache Kafka project itself
+  # (not a third-party repackaging) — introduced alongside KRaft
+  # becoming the default in Kafka 3.7+. We're intentionally NOT using
+  # bitnami/kafka here: Broadcom restructured Bitnami's public catalog
+  # in 2025, moving all versioned tags out of the free `bitnami/kafka`
+  # repo into a separate, unmaintained `bitnamilegacy/kafka` repo —
+  # exactly the kind of third-party dependency risk that using the
+  # actual upstream project's own image avoids.
+  #
+  # KRaft mode (Kafka's built-in consensus, replacing Zookeeper) —
+  # simpler to run locally: one container instead of two. A single
+  # broker acting as its own controller — nowhere near a real
+  # production topology (which would run 3+ brokers for fault
+  # tolerance), but sufficient and honest for a local learning setup
+  # where we're teaching Kafka's client-facing concepts, not operating
+  # a Kafka cluster.
+  kafka:
+    image: apache/kafka:3.9.2
+    container_name: url_shortener_kafka
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 0
+      KAFKA_PROCESS_ROLES: controller,broker
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Single-broker local setup: these all default to 3 (assuming a
+      # real multi-broker cluster), which would leave internal topics
+      # stuck waiting for replicas that will never exist. Set to 1 to
+      # match our actual single-broker reality.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # We create topics explicitly (see app/events/admin.py) with a
+      # chosen partition count, rather than relying on auto-create's
+      # single-partition default — this flag is off deliberately, to
+      # make that a hard requirement, not an accident of timing.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      # The apache/kafka image ships full Kafka CLI tooling, so unlike
+      # the earlier TCP-only check, this asks the broker itself to
+      # confirm it's actually serving the Kafka protocol, not just
+      # that the port is open.
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+    networks:
+      - url_shortener_net
+
   api:
     build:
       context: .
@@ -50,6 +110,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
     networks:
       - url_shortener_net
     # In dev, mount source for live reload. Remove this in prod images.
@@ -60,6 +122,30 @@ services:
       - ./tests:/app/tests
       - ./pytest.ini:/app/pytest.ini
 
+  # The Kafka consumer, running as its own long-lived process,
+  # completely separate from the FastAPI app — see the module docstring
+  # in app/workers/click_event_consumer.py for why. Reuses the exact
+  # same image as `api` (same dependencies, same code), just overrides
+  # the command that gets run.
+  consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: url_shortener_consumer
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.click_event_consumer"]
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - url_shortener_net
+    volumes:
+      - ./app:/app/app
+
 networks:
   url_shortener_net:
     driver: bridge
@@ -67,3 +153,4 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  kafka_data:
