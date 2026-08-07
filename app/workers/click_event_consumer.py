@@ -31,6 +31,7 @@ from app.events.admin import ensure_topics_exist
 from app.events.schemas import ClickEvent
 from app.events.user_agent_parser import parse_browser, parse_device_type
 from app.models.click_event import ClickEvent as ClickEventModel
+from app.repository.stats_repository import StatsRepository
 from app.repository.url_repository import URLRepository
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -81,6 +82,18 @@ async def process_message(raw_value: bytes, dlq_producer: AIOKafkaProducer) -> N
                     browser=parse_browser(event.user_agent),
                 )
                 session.add(click_row)
+
+                # Save the raw click AND bump the running totals as
+                # ONE transaction (commit=False here, single commit
+                # below) — either both happen, or neither does. That
+                # matters: if these were two separate commits and the
+                # process crashed between them, the "camera footage"
+                # and the "register total" could drift apart.
+                stats_repository = StatsRepository(session)
+                await stats_repository.record_click(
+                    url_id=url_row.id, clicked_at=event.timestamp, commit=False
+                )
+
                 await session.commit()
 
             logger.info(

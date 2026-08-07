@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes.redirect import router as redirect_router
 from app.api.routes.shorten import router as shorten_router
+from app.api.routes.stats import router as stats_router
 from app.core.config import settings
 from app.events.admin import ensure_topics_exist
 from app.events.producer import kafka_producer
@@ -49,6 +50,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="URL Shortener", version="0.1.0", lifespan=lifespan)
 app.include_router(shorten_router)
+app.include_router(stats_router)
 
 
 @app.get("/health/live")

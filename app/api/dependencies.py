@@ -20,12 +20,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.cache.redis_client import get_redis_client
 from app.cache.url_cache import URLCache
 from app.core.database import get_db
+from app.repository.stats_repository import StatsRepository
 from app.repository.url_repository import URLRepository
+from app.services.stats_service import StatsService
 from app.services.url_service import URLService
 
 
 def get_url_repository(session: AsyncSession = Depends(get_db)) -> URLRepository:
     return URLRepository(session)
+
+
+def get_stats_repository(session: AsyncSession = Depends(get_db)) -> StatsRepository:
+    return StatsRepository(session)
 
 
 def get_url_cache(client: redis.Redis = Depends(get_redis_client)) -> URLCache:
@@ -37,3 +43,10 @@ def get_url_service(
     cache: URLCache = Depends(get_url_cache),
 ) -> URLService:
     return URLService(repository, cache)
+
+
+def get_stats_service(
+    url_repository: URLRepository = Depends(get_url_repository),
+    stats_repository: StatsRepository = Depends(get_stats_repository),
+) -> StatsService:
+    return StatsService(url_repository, stats_repository)
