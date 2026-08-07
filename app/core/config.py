@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     kafka_click_events_dlq_topic: str = "click-events-dlq"
     kafka_consumer_group_id: str = "click-event-processor"
 
+    # --- Rate limiting ---
+    # How many requests one IP address may make per 60-second window
+    # before getting a 429. Kept as a setting (not a hardcoded number)
+    # so it can be tuned per environment without a code change.
+    rate_limit_requests_per_minute: int = 60
+
     @property
     def base_host(self) -> str:
         from urllib.parse import urlparse
