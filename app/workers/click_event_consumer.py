@@ -27,6 +27,7 @@ from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
+from app.core.logging_config import setup_logging
 from app.events.admin import ensure_topics_exist
 from app.events.schemas import ClickEvent
 from app.events.user_agent_parser import parse_browser, parse_device_type
@@ -34,7 +35,7 @@ from app.models.click_event import ClickEvent as ClickEventModel
 from app.repository.stats_repository import StatsRepository
 from app.repository.url_repository import URLRepository
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+setup_logging()
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3

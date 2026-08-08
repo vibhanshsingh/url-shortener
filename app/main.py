@@ -34,9 +34,13 @@ from app.api.routes.shorten import router as shorten_router
 from app.api.routes.stats import router as stats_router
 from app.cache.redis_client import redis_client
 from app.core.config import settings
+from app.core.logging_config import setup_logging
 from app.events.admin import ensure_topics_exist
 from app.events.producer import kafka_producer
+from app.middleware.correlation_id import CorrelationIdMiddleware
 from app.middleware.rate_limit import RateLimitMiddleware
+
+setup_logging()
 
 
 @asynccontextmanager
@@ -51,10 +55,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="URL Shortener", version="0.1.0", lifespan=lifespan)
-# Middleware runs on EVERY request automatically — no need to remember
-# to add it to each route by hand. Reuses the same shared Redis client
-# from app/cache/redis_client.py, not a separate connection.
+# Order matters here: in Starlette, the LAST middleware added ends up
+# OUTERMOST, meaning it's the first to see an incoming request. We add
+# RateLimitMiddleware first and CorrelationIdMiddleware second, so the
+# correlation ID gets set before rate limiting (or anything else) runs
+# — otherwise a rate-limited request's logs would have no tracking
+# number attached to them, which is exactly the case where you'd want
+# one most.
 app.add_middleware(RateLimitMiddleware, redis_client=redis_client)
+app.add_middleware(CorrelationIdMiddleware)
 app.include_router(shorten_router)
 app.include_router(stats_router)
 
