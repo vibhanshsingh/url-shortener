@@ -136,6 +136,8 @@ services:
     command: ["python", "-m", "app.workers.click_event_consumer"]
     env_file:
       - .env
+    ports:
+      - "8001:8001"  # consumer's own /metrics endpoint
     depends_on:
       db:
         condition: service_healthy
@@ -146,6 +148,37 @@ services:
     volumes:
       - ./app:/app/app
 
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: url_shortener_prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - url_shortener_net
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: url_shortener_grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Local learning setup only — a real deployment would never use
+      # a fixed default admin password like this.
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - url_shortener_net
+
 networks:
   url_shortener_net:
     driver: bridge
@@ -154,3 +187,5 @@ volumes:
   postgres_data:
   redis_data:
   kafka_data:
+  prometheus_data:
+  grafana_data:

@@ -24,10 +24,12 @@ import asyncio
 import logging
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from prometheus_client import start_http_server
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.logging_config import setup_logging
+from app.core.metrics import click_events_dlq_total, click_events_processed_total
 from app.events.admin import ensure_topics_exist
 from app.events.schemas import ClickEvent
 from app.events.user_agent_parser import parse_browser, parse_device_type
@@ -70,6 +72,7 @@ async def process_message(raw_value: bytes, dlq_producer: AIOKafkaProducer) -> N
                         "No URL found for short_code=%s; routing to DLQ", event.short_code
                     )
                     await _send_to_dlq(dlq_producer, raw_value, reason="unknown_short_code")
+                    click_events_dlq_total.inc()
                     return
 
                 click_row = ClickEventModel(
@@ -100,6 +103,7 @@ async def process_message(raw_value: bytes, dlq_producer: AIOKafkaProducer) -> N
             logger.info(
                 "Processed click event: short_code=%s attempt=%d", event.short_code, attempt
             )
+            click_events_processed_total.inc()
             return  # success — exit the retry loop
 
         except Exception as exc:  # noqa: BLE001 — deliberately broad, see module docstring
@@ -115,6 +119,7 @@ async def process_message(raw_value: bytes, dlq_producer: AIOKafkaProducer) -> N
     # of losing it silently or blocking the partition indefinitely.
     logger.error("Exhausted retries, routing to DLQ. Last error: %s", last_error)
     await _send_to_dlq(dlq_producer, raw_value, reason=str(last_error))
+    click_events_dlq_total.inc()
 
 
 async def _send_to_dlq(producer: AIOKafkaProducer, raw_value: bytes, reason: str) -> None:
@@ -134,6 +139,18 @@ async def run_consumer() -> None:
     # Idempotent — safe even if the API container already created
     # these topics. Guards against the consumer starting first.
     await ensure_topics_exist()
+
+    # The consumer isn't a web app, so it has no FastAPI /metrics route
+    # the way the API does. prometheus_client.start_http_server spins
+    # up a tiny, separate, built-in HTTP server just for /metrics — on
+    # its own port (8001), configured as its own scrape target in
+    # Prometheus. This is exactly why the metrics themselves live in
+    # app/core/metrics.py rather than in either app.main or this file:
+    # both processes increment the SAME Counter objects (well, their
+    # own in-process copies of them), each exposed via a different
+    # HTTP server.
+    start_http_server(8001)
+    logger.info("Consumer metrics server listening on :8001/metrics")
 
     consumer = AIOKafkaConsumer(
         settings.kafka_click_events_topic,

@@ -17,6 +17,12 @@ from urllib.parse import urlparse
 
 from app.cache.url_cache import URLCache
 from app.core.config import settings
+from app.core.metrics import (
+    cache_hits_total,
+    cache_misses_total,
+    redirects_total,
+    urls_created_total,
+)
 from app.models.url import URL
 from app.repository.url_repository import URLRepository
 from app.services.encoding import encode
@@ -100,6 +106,7 @@ class URLService:
         # for the first redirect to pay the cache-miss cost.
         await self._cache.set(url_row.short_code, url_row.long_url, url_row.expires_at)
 
+        urls_created_total.inc()
         return url_row, False
 
     async def resolve_for_redirect(self, short_code: str) -> RedirectTarget:
@@ -119,25 +126,33 @@ class URLService:
         """
         cached = await self._cache.get(short_code)
         if cached is not None:
+            cache_hits_total.inc()
             if self._is_expired(cached.get("expires_at")):
                 await self._cache.invalidate(short_code)
+                redirects_total.labels(result="gone").inc()
                 raise URLGoneError(f"Short code {short_code!r} expired (cache hit)")
+            redirects_total.labels(result="success").inc()
             return RedirectTarget(long_url=cached["long_url"])
 
+        cache_misses_total.inc()
         row = await self._repository.get_by_short_code_any_status(short_code)
 
         if row is None:
+            redirects_total.labels(result="not_found").inc()
             raise URLNotFoundError(f"No URL found for short code {short_code!r}")
 
         if not row.is_active:
+            redirects_total.labels(result="gone").inc()
             raise URLGoneError(f"Short code {short_code!r} has been deactivated")
 
         if row.expires_at is not None and row.expires_at <= datetime.now(timezone.utc):
+            redirects_total.labels(result="gone").inc()
             raise URLGoneError(f"Short code {short_code!r} expired at {row.expires_at}")
 
         # Cache miss resolved successfully — warm it for next time.
         await self._cache.set(row.short_code, row.long_url, row.expires_at)
 
+        redirects_total.labels(result="success").inc()
         return RedirectTarget(long_url=row.long_url)
 
     @staticmethod

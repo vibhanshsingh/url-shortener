@@ -1,0 +1,14 @@
+# Plain-language version: without this file, the first time you open
+# Grafana you'd have to manually click through "Add data source ->
+# Prometheus -> type in the URL -> Save" yourself. This file does that
+# same thing automatically the moment Grafana starts, so it's already
+# connected and ready when you open it.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true

@@ -24,11 +24,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from app.core.config import settings
+from app.core.metrics import rate_limit_exceeded_total
 
-# Health checks are hit constantly by Docker/an orchestrator — they
-# should never be rate-limited, or a busy app could get marked
-# "unhealthy" and restarted purely because of its own health checks.
-EXEMPT_PATHS = {"/health/live", "/health/ready"}
+# Health checks are hit constantly by Docker/an orchestrator, and
+# /metrics is hit constantly by Prometheus — neither should ever be
+# rate-limited, or routine infrastructure polling could get itself
+# blocked and misreported as "unhealthy" or "no data."
+EXEMPT_PATHS = {"/health/live", "/health/ready", "/metrics"}
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -61,6 +63,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             await self._redis.expire(key, 60)
 
         if count > settings.rate_limit_requests_per_minute:
+            rate_limit_exceeded_total.inc()
             return JSONResponse(
                 status_code=429,
                 content={

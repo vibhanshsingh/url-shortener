@@ -27,7 +27,8 @@ from contextlib import asynccontextmanager
 import asyncpg
 import redis.asyncio as redis
 from fastapi import FastAPI, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app.api.routes.redirect import router as redirect_router
 from app.api.routes.shorten import router as shorten_router
@@ -38,6 +39,7 @@ from app.core.logging_config import setup_logging
 from app.events.admin import ensure_topics_exist
 from app.events.producer import kafka_producer
 from app.middleware.correlation_id import CorrelationIdMiddleware
+from app.middleware.metrics import MetricsMiddleware
 from app.middleware.rate_limit import RateLimitMiddleware
 
 setup_logging()
@@ -61,9 +63,12 @@ app = FastAPI(title="URL Shortener", version="0.1.0", lifespan=lifespan)
 # correlation ID gets set before rate limiting (or anything else) runs
 # — otherwise a rate-limited request's logs would have no tracking
 # number attached to them, which is exactly the case where you'd want
-# one most.
+# one most. MetricsMiddleware goes last/outermost of all, so it times
+# and counts EVERY request as the client actually experienced it —
+# including ones rejected by the rate limiter.
 app.add_middleware(RateLimitMiddleware, redis_client=redis_client)
 app.add_middleware(CorrelationIdMiddleware)
+app.add_middleware(MetricsMiddleware)
 app.include_router(shorten_router)
 app.include_router(stats_router)
 
@@ -71,6 +76,15 @@ app.include_router(stats_router)
 @app.get("/health/live")
 async def liveness() -> dict:
     return {"status": "alive"}
+
+
+@app.get("/metrics")
+async def metrics() -> Response:
+    # generate_latest() reads every Counter/Histogram defined in
+    # app/core/metrics.py and renders them in Prometheus's plain-text
+    # exposition format — this is literally what Prometheus scrapes
+    # every 15 seconds (see monitoring/prometheus.yml).
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/health/ready")

@@ -18,6 +18,7 @@ import logging
 from aiokafka import AIOKafkaProducer
 
 from app.core.config import settings
+from app.core.metrics import click_events_publish_failed_total, click_events_published_total
 from app.events.schemas import ClickEvent
 
 logger = logging.getLogger(__name__)
@@ -71,12 +72,14 @@ class KafkaEventProducer:
                 key=event.short_code.encode("utf-8"),  # partitioning key — see admin.py's docstring
                 value=event.to_kafka_value(),
             )
+            click_events_published_total.inc()
         except Exception:
             # Deliberately broad: ANY failure to publish a click event
             # must never propagate up and affect the caller. This is
             # the concrete implementation of "the redirect never waits
             # on analytics" — extended to "and analytics failures never
             # affect the redirect" either.
+            click_events_publish_failed_total.inc()
             logger.exception("Failed to publish click event for short_code=%s", event.short_code)
 
 
