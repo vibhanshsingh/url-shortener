@@ -31,12 +31,11 @@ class KafkaEventProducer:
     async def start(self) -> None:
         self._producer = AIOKafkaProducer(
             bootstrap_servers=settings.kafka_bootstrap_servers,
-            # acks=1: leader broker confirms the write before we
-            # consider publish successful. acks="all" would be more
-            # durable (waits for replicas) but our single-broker local
-            # setup has no replicas to wait for — acks=1 is the
-            # meaningful choice here, with a note that production
-            # (replication_factor=3) would use acks="all".
+            # acks=-1: all replicas confirm the write before we
+            # consider publish successful. This is the most durable
+            # option, ensuring data is replicated across all brokers.
+            # In a production environment with replication_factor=3,
+            # this ensures data durability even if some brokers fail.
             acks=-1,
             enable_idempotence=True,  # avoids duplicate messages on producer-side retries
         )

@@ -11,6 +11,10 @@ Design decisions (recap from Milestone 1 discussion):
   analytics history or force a cascading data loss.
 - The partial index only covers active rows, since ~100% of redirect
   traffic queries WHERE is_active = true.
+- long_url is unique (added in Milestone 13): this is what makes the
+  content-based idempotency guarantee from Milestone 5 actually
+  airtight under concurrent requests — see
+  app/services/url_service.py's handling of the resulting conflict.
 """
 
 from datetime import datetime
@@ -28,7 +32,7 @@ class URL(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     short_code: Mapped[str] = mapped_column(String(10), unique=True, nullable=False)
-    long_url: Mapped[str] = mapped_column(Text, nullable=False)
+    long_url: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False

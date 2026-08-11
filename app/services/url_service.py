@@ -24,7 +24,7 @@ from app.core.metrics import (
     urls_created_total,
 )
 from app.models.url import URL
-from app.repository.url_repository import URLRepository
+from app.repository.url_repository import DuplicateLongURLError, URLRepository
 from app.services.encoding import encode
 
 
@@ -93,12 +93,36 @@ class URLService:
         new_id = await self._repository.reserve_next_id()
         short_code = encode(new_id)
 
-        url_row = await self._repository.create_with_id(
-            id_=new_id,
-            short_code=short_code,
-            long_url=long_url,
-            created_by_ip=created_by_ip,
-        )
+        try:
+            url_row = await self._repository.create_with_id(
+                id_=new_id,
+                short_code=short_code,
+                long_url=long_url,
+                created_by_ip=created_by_ip,
+            )
+        except DuplicateLongURLError:
+            # MILESTONE 13: this is the actual fix for the race
+            # condition flagged back in Milestone 5. We lost the race
+            # — another request created a row for this exact long_url
+            # between our idempotency check above and our insert just
+            # now. Rather than erroring, we simply go fetch the row
+            # that WON and return that instead — from the caller's
+            # point of view, this looks identical to a normal
+            # idempotent hit, which is exactly correct: two
+            # simultaneous requests for the same URL should both end
+            # up with the same short code, full stop.
+            winning_row = await self._repository.get_active_by_long_url(long_url)
+            if winning_row is None:
+                # Vanishingly unlikely (would mean the row was deleted
+                # in the instant between the conflict and this
+                # re-fetch), but re-raising rather than silently
+                # returning None keeps this an honest, loud failure
+                # instead of a confusing one.
+                raise
+            await self._cache.set(
+                winning_row.short_code, winning_row.long_url, winning_row.expires_at
+            )
+            return winning_row, True
 
         # Cache warming (Milestone 1 concept, implemented here): a
         # freshly-created URL is statistically likely to be clicked

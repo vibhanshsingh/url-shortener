@@ -8,10 +8,22 @@ later (Milestone 15) by editing this one file.
 """
 
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.url import URL
 from app.models.url_stats import URLStats
+
+
+class DuplicateLongURLError(Exception):
+    """
+    Raised when create_with_id() loses a race: another request created
+    a row for this exact long_url between our idempotency check and
+    our insert. The unique constraint on urls.long_url (Milestone 13)
+    is what makes Postgres itself the referee here — see
+    app/services/url_service.py for how the service layer responds to
+    this (re-fetch the winning row, return it instead of erroring).
+    """
 
 
 class URLRepository:
@@ -78,6 +90,10 @@ class URLRepository:
         row — creating them together, atomically, means the analytics
         endpoint in Milestone 9 never has to handle a "stats row is
         missing" case as a special path.
+
+        MILESTONE 13: can now raise DuplicateLongURLError if another
+        request won the race to create this exact long_url first — see
+        that exception's docstring above for the full story.
         """
         url_row = URL(
             id=id_,
@@ -89,7 +105,18 @@ class URLRepository:
 
         self._session.add(url_row)
         self._session.add(stats_row)
-        await self._session.commit()
-        await self._session.refresh(url_row)
+        try:
+            await self._session.commit()
+        except IntegrityError as exc:
+            # MUST roll back — without this, the session is left in a
+            # broken, unusable state after a failed commit, and the
+            # NEXT operation on it (even an unrelated one) would raise
+            # a confusing "this session's transaction has been rolled
+            # back" error instead of working normally.
+            await self._session.rollback()
+            raise DuplicateLongURLError(
+                f"Another request already created a URL for {long_url!r}"
+            ) from exc
 
+        await self._session.refresh(url_row)
         return url_row

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.repository.url_repository import DuplicateLongURLError
 from app.services.url_service import (
     RedirectTarget,
     SelfReferentialURLError,
@@ -39,6 +40,17 @@ class FakeURLRepository:
         # Lets tests assert the cache actually prevented a DB call,
         # not just that the returned value happened to be correct.
         self.db_lookup_count = 0
+        # Milestone 13: simulates "another request already won the
+        # race and created this row." Call simulate_race_loss() to
+        # arm it — the NEXT create_with_id() call for that long_url
+        # will insert the winning row instead of the caller's data,
+        # then raise DuplicateLongURLError exactly once.
+        self._race_loss_long_url: str | None = None
+        self._race_winner: SimpleNamespace | None = None
+
+    def simulate_race_loss(self, long_url: str, winner: SimpleNamespace) -> None:
+        self._race_loss_long_url = long_url
+        self._race_winner = winner
 
     async def get_active_by_long_url(self, long_url: str):
         return self._by_long_url.get(long_url)
@@ -53,6 +65,12 @@ class FakeURLRepository:
         return id_
 
     async def create_with_id(self, *, id_, short_code, long_url, created_by_ip):
+        if self._race_loss_long_url == long_url:
+            self._by_long_url[long_url] = self._race_winner
+            self._by_short_code[self._race_winner.short_code] = self._race_winner
+            self._race_loss_long_url = None  # only trigger once
+            raise DuplicateLongURLError(f"Simulated race loss for {long_url!r}")
+
         row = SimpleNamespace(
             id=id_,
             short_code=short_code,
@@ -249,3 +267,61 @@ class TestCacheAsideBehavior:
 
         # The stale entry should have been cleaned up, not left behind.
         assert await cache.get(created.short_code) is None
+
+
+class TestConcurrentCreationRace:
+    """
+    Milestone 13: proves the fix for the race condition flagged back
+    in Milestone 5. Two requests for the same brand-new long_url both
+    pass the idempotency check (neither sees the other's row yet,
+    because neither has committed). One wins the actual insert; the
+    other must detect the conflict and gracefully return the winner's
+    row instead of erroring or creating a duplicate.
+    """
+
+    async def test_losing_the_race_returns_the_winning_row_instead_of_erroring(
+        self, service, repository, cache
+    ):
+        long_url = "https://example.com/race-condition-test"
+        winning_row = SimpleNamespace(
+            id=9999,
+            short_code="9999",
+            long_url=long_url,
+            created_by_ip="9.9.9.9",
+            created_at=datetime.now(timezone.utc),
+            is_active=True,
+            expires_at=None,
+        )
+        # At the moment our request's idempotency check ran, the
+        # winner hadn't committed yet — so get_active_by_long_url must
+        # currently return nothing for this URL (it's the default
+        # empty state, nothing more to arrange there). Arm the
+        # simulated conflict for the upcoming create_with_id() call:
+        repository.simulate_race_loss(long_url, winning_row)
+
+        row, already_existed = await service.create_short_url(long_url, created_by_ip="1.1.1.1")
+
+        assert already_existed is True
+        assert row.short_code == "9999"  # the WINNER's code, not a new one
+        assert row.long_url == long_url
+
+    async def test_race_loss_still_warms_the_cache_with_winning_code(
+        self, service, repository, cache
+    ):
+        long_url = "https://example.com/race-cache-test"
+        winning_row = SimpleNamespace(
+            id=8888,
+            short_code="8888",
+            long_url=long_url,
+            created_by_ip=None,
+            created_at=datetime.now(timezone.utc),
+            is_active=True,
+            expires_at=None,
+        )
+        repository.simulate_race_loss(long_url, winning_row)
+
+        await service.create_short_url(long_url, created_by_ip=None)
+
+        cached = await cache.get("8888")
+        assert cached is not None
+        assert cached["long_url"] == long_url

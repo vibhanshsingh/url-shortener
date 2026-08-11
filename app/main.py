@@ -22,13 +22,15 @@ the DB had a transient blip, an orchestrator might kill and restart
 want during a database hiccup.
 """
 
+import logging
 from contextlib import asynccontextmanager
 
 import asyncpg
 import redis.asyncio as redis
-from fastapi import FastAPI, status
+from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from app.api.routes.redirect import router as redirect_router
 from app.api.routes.shorten import router as shorten_router
@@ -43,6 +45,7 @@ from app.middleware.metrics import MetricsMiddleware
 from app.middleware.rate_limit import RateLimitMiddleware
 
 setup_logging()
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -71,6 +74,49 @@ app.add_middleware(CorrelationIdMiddleware)
 app.add_middleware(MetricsMiddleware)
 app.include_router(shorten_router)
 app.include_router(stats_router)
+
+
+@app.exception_handler(OperationalError)
+@app.exception_handler(DBAPIError)
+async def database_unavailable_handler(request: Request, exc: Exception) -> JSONResponse:
+    """
+    MILESTONE 13 — plain-language version: if Postgres is down or
+    unreachable and something DOES need to hit it (the write path
+    always does; the read path only on a cache miss), this catches
+    that failure everywhere at once, instead of needing a try/except
+    around every single database call in every route. The person
+    calling our API gets a clean, honest "service unavailable, try
+    again" instead of a raw Python stack trace — which would be both
+    confusing AND a security concern (stack traces can leak internal
+    details like file paths, query structure, or connection info).
+
+    503, not 500: 503 specifically communicates "this is temporary,
+    the dependency is down" — a well-behaved client can reasonably
+    retry a 503. A generic 500 gives no such signal.
+    """
+    logger.error("Database unavailable: %s", exc)
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"detail": "Service temporarily unavailable. Please try again shortly."},
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """
+    The safety net of last resort. Anything that reaches here is a bug
+    or a failure mode we haven't specifically named yet — the person
+    calling the API still gets a clean, generic 500 instead of a raw
+    traceback; the FULL detail goes to our own logs (with the
+    correlation ID attached, per Milestone 11), which is exactly where
+    an on-call engineer would look, not where a random caller should
+    ever see it.
+    """
+    logger.exception("Unhandled exception processing request: %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "An unexpected error occurred."},
+    )
 
 
 @app.get("/health/live")

@@ -16,6 +16,7 @@ remember to add "Depends(rate_limit)" to every single route by hand —
 one place, applied automatically, nothing to forget.
 """
 
+import logging
 import time
 
 import redis.asyncio as redis
@@ -54,13 +55,24 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # INCR both creates the key at 1 (if it's the first request
         # this minute) and adds 1 to it (every time after) — one
         # command does both jobs.
-        count = await self._redis.incr(key)
-        if count == 1:
-            # Only set the auto-expire on the very first request of
-            # this window — setting it again on every request would
-            # keep pushing the expiry forward and the "bucket" would
-            # never actually reset.
-            await self._redis.expire(key, 60)
+        try:
+            count = await self._redis.incr(key)
+            if count == 1:
+                # Only set the auto-expire on the very first request of
+                # this window — setting it again on every request would
+                # keep pushing the expiry forward and the "bucket" would
+                # never actually reset.
+                await self._redis.expire(key, 60)
+        except Exception as exc:
+            # Redis is a best-effort dependency for rate limiting.
+            # If it is unavailable, we should not prevent the request
+            # from reaching the application or from being served from
+            # Postgres.
+            logging.warning(
+                "Rate limiting unavailable, degrading to no rate limit: %s",
+                exc,
+            )
+            return await call_next(request)
 
         if count > settings.rate_limit_requests_per_minute:
             rate_limit_exceeded_total.inc()
