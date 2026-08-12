@@ -1,0 +1,15 @@
+# Plain-language version: this file doesn't stand on its own — it's
+# layered ON TOP of docker-compose.yml using `-f docker-compose.yml -f
+# docker-compose.loadtest.yml`. Docker Compose merges the two, and
+# whatever's here overrides the matching value from the base file.
+#
+# We use this specifically to raise the rate limit sky-high for a load
+# test run. This is NOT "the rate limit is broken" — it's the opposite:
+# it's treating rate limiting correctly as something that should be
+# configured per-environment, not something you'd ever want to
+# permanently weaken just to make your own load test pass.
+
+services:
+  api:
+    environment:
+      RATE_LIMIT_REQUESTS_PER_MINUTE: "1000000"

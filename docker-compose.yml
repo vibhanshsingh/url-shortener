@@ -112,6 +112,10 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
     networks:
       - url_shortener_net
     # In dev, mount source for live reload. Remove this in prod images.
@@ -176,6 +180,26 @@ services:
       - grafana_data:/var/lib/grafana
     depends_on:
       - prometheus
+    networks:
+      - url_shortener_net
+
+  # Plain-language version: "profiles" is Docker Compose's way of
+  # saying "this service is OPT-IN, not part of the normal stack." A
+  # regular `docker compose up` will never start Locust — you have to
+  # explicitly ask for it with `--profile loadtest`. That's deliberate:
+  # nobody wants a load-testing tool quietly running every time they
+  # start the project for normal development.
+  locust:
+    image: locustio/locust:2.32.4
+    container_name: url_shortener_locust
+    profiles: ["loadtest"]
+    ports:
+      - "8089:8089"  # Locust's own web dashboard
+    volumes:
+      - ./loadtest:/mnt/locust
+    command: ["-f", "/mnt/locust/locustfile.py", "--host", "http://api:8000"]
+    depends_on:
+      - api
     networks:
       - url_shortener_net
 
