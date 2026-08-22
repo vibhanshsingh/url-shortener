@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     # someone trying to shorten a URL that points back at us (which
     # would create a confusing or infinite redirect chain).
     base_url: str = "http://localhost:8000"
+    cors_allowed_origins: str = "http://localhost:4200"
 
     # --- Kafka ---
     kafka_bootstrap_servers: str = "kafka:9092"

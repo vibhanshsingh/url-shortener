@@ -31,6 +31,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.exc import DBAPIError, OperationalError
+from starlette.middleware.cors import CORSMiddleware
 
 from app.api.routes.redirect import router as redirect_router
 from app.api.routes.shorten import router as shorten_router
@@ -66,12 +67,18 @@ app = FastAPI(title="URL Shortener", version="0.1.0", lifespan=lifespan)
 # correlation ID gets set before rate limiting (or anything else) runs
 # — otherwise a rate-limited request's logs would have no tracking
 # number attached to them, which is exactly the case where you'd want
-# one most. MetricsMiddleware goes last/outermost of all, so it times
-# and counts EVERY request as the client actually experienced it —
-# including ones rejected by the rate limiter.
+# one most. MetricsMiddleware times and counts every request that reaches
+# the application. CORS is added last so it handles preflight requests
+# before they reach the rate limiter and adds headers to all responses.
 app.add_middleware(RateLimitMiddleware, redis_client=redis_client)
 app.add_middleware(CorrelationIdMiddleware)
 app.add_middleware(MetricsMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[origin.strip() for origin in settings.cors_allowed_origins.split(",")],
+    allow_methods=["GET", "OPTIONS"],
+    allow_headers=["*"],
+)
 app.include_router(shorten_router)
 app.include_router(stats_router)
 
